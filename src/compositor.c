@@ -4311,8 +4311,6 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	weston_compositor_wake(ec);
-
 	wl_display_run(display);
 
  out:
