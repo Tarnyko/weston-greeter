@@ -4025,6 +4025,7 @@ desktop_shell_set_lock_surface(struct wl_client *client,
 			       struct wl_resource *surface_resource)
 {
 	struct desktop_shell *shell = wl_resource_get_user_data(resource);
+	struct weston_seat *seat;
 	struct weston_surface *surface =
 		wl_resource_get_user_data(surface_resource);
 
@@ -4042,6 +4043,9 @@ desktop_shell_set_lock_surface(struct wl_client *client,
 	weston_view_create(surface);
 	surface->configure = lock_surface_configure;
 	surface->configure_private = shell;
+
+	wl_list_for_each(seat, &shell->compositor->seat_list, link)
+		weston_keyboard_set_focus(seat->keyboard, surface);
 }
 
 static void

@@ -144,6 +144,8 @@ struct user_entry {
 struct password_dialog {
 	struct window *window;
 	struct widget *widget;
+	char *text;
+	int cursor_pos;
 	struct user_entry *entry;
 };
 
@@ -790,6 +792,148 @@ background_configure(void *data,
 	widget_schedule_resize(background->widget, width, height);
 }
 
+static void
+password_dialog_destroy(struct password_dialog *dialog);
+
+static void
+password_dialog_key_handler(struct window *window, struct input *input,
+				 uint32_t time, uint32_t key, uint32_t sym,
+				 enum wl_keyboard_key_state state, void *data)
+{
+	struct password_dialog *dialog = data;
+	char *new_text;
+	char text[16];
+
+	if (state == WL_KEYBOARD_KEY_STATE_RELEASED)
+		return;
+
+	if (sym == XKB_KEY_Escape) {
+		password_dialog_destroy(dialog);
+		return;
+	}
+
+	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+		if (!dialog->entry->dialog->closing) {
+			display_defer(dialog->entry->dialog->desktop->display,
+			              &dialog->entry->dialog->desktop->unlock_task);
+			dialog->entry->dialog->closing = 1;
+		}
+		password_dialog_destroy(dialog);
+		return;
+	}
+
+	switch (sym) {
+		case XKB_KEY_BackSpace:
+			if (dialog->cursor_pos == 0)
+				break;
+			new_text = malloc(strlen(dialog->text));
+			strncpy(new_text, dialog->text, dialog->cursor_pos - 1);
+			strcpy(new_text + dialog->cursor_pos - 1, dialog->text + dialog->cursor_pos);
+			free(dialog->text);
+			dialog->text = new_text;
+			dialog->cursor_pos--;
+			break;
+		case XKB_KEY_Delete:
+		case XKB_KEY_Left:
+		case XKB_KEY_Right:
+		case XKB_KEY_Tab:
+			break;
+		default:
+			if (strlen(dialog->text) >= 30)
+				break;
+			if (xkb_keysym_to_utf8(sym, text, sizeof(text)) <= 0)
+				break;
+			if (strlen(text) > 1)	/* dismiss non-ASCII characters for now */
+				break;
+			new_text = malloc(strlen(dialog->text) + 1 + 1);
+			strncpy(new_text, dialog->text, dialog->cursor_pos);
+			strcpy(new_text + dialog->cursor_pos, text);
+			strcpy(new_text + dialog->cursor_pos + 1, dialog->text + dialog->cursor_pos);
+			free(dialog->text);
+			dialog->text = new_text;
+			dialog->cursor_pos++;
+	}
+
+	widget_schedule_redraw(dialog->widget);
+}
+
+static void
+password_dialog_redraw_handler(struct widget *widget, void *data)
+{
+	struct password_dialog *dialog = data;
+	struct rectangle allocation;
+	cairo_surface_t *surface;
+	cairo_t *cr;
+	cairo_text_extents_t extents;
+	char *pass_text;
+	unsigned int pos;
+
+	cr = widget_cairo_create(widget);
+
+	widget_get_allocation(dialog->widget, &allocation);
+	cairo_rectangle(cr, allocation.x, allocation.y,
+			allocation.width, allocation.height);
+	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
+	cairo_fill(cr);
+
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 1.0);
+	cairo_select_font_face(cr, "sans",
+	                       CAIRO_FONT_SLANT_NORMAL,
+	                       CAIRO_FONT_WEIGHT_NORMAL);
+	cairo_set_font_size(cr, 18);
+
+	pass_text = malloc(strlen(dialog->text) + 1);
+	for (pos = 0; pos < strlen(dialog->text); pos++) {
+		pass_text[pos] = '*';
+	}
+	pass_text[pos++] = '\0';
+	cairo_text_extents(cr, pass_text, &extents);
+	cairo_move_to(cr, allocation.x + (allocation.width - extents.width)/2,
+	                  allocation.y + (allocation.height - extents.height)/2 + 10);
+	cairo_show_text(cr, pass_text);
+	free(pass_text);
+
+	cairo_destroy(cr);
+
+	surface = window_get_surface(dialog->window);
+	cairo_surface_destroy(surface);
+}
+
+static void
+password_dialog_create(struct user_entry *entry)
+{
+	struct password_dialog *dialog;
+
+	dialog = xzalloc(sizeof *dialog);
+	dialog->entry = entry;
+	dialog->text = strdup("");
+	dialog->cursor_pos = 0;
+	dialog->window = window_create_custom(entry->dialog->desktop->display);
+	dialog->widget = window_frame_create(dialog->window, dialog);
+	window_set_title(dialog->window, "Enter your password");
+
+	window_set_user_data(dialog->window, dialog);
+	window_set_key_handler (dialog->window,
+	                        password_dialog_key_handler);
+	widget_set_redraw_handler(dialog->widget,
+	                          password_dialog_redraw_handler);
+
+	desktop_shell_set_lock_surface(entry->dialog->desktop->shell,
+				       window_get_wl_surface(dialog->window));
+
+	window_schedule_resize(dialog->window, 400, 100);
+}
+
+static void
+password_dialog_destroy(struct password_dialog *dialog)
+{
+	widget_destroy(dialog->widget);
+	window_destroy(dialog->window);
+	free(dialog->text);
+	free(dialog);
+}
+
 static int
 user_entry_enter_handler(struct widget *widget,
 				 struct input *input,
@@ -823,12 +967,8 @@ user_entry_button_handler(struct widget *widget,
 
 	widget_schedule_redraw(widget);
 
-	if (state == WL_POINTER_BUTTON_STATE_RELEASED &&
-	             !entry->dialog->closing) {
-			display_defer(entry->dialog->desktop->display,
-			              &entry->dialog->desktop->unlock_task);
-			entry->dialog->closing = 1;
-	}
+	if (state == WL_POINTER_BUTTON_STATE_RELEASED)
+		password_dialog_create(entry);
 }
 
 static void
@@ -919,7 +1059,6 @@ unlock_dialog_redraw_handler(struct widget *widget, void *data)
 {
 	struct unlock_dialog *dialog = data;
 	struct rectangle allocation;
-	cairo_surface_t *surface;
 	cairo_t *cr;
 
 	cr = widget_cairo_create(widget);
@@ -932,9 +1071,6 @@ unlock_dialog_redraw_handler(struct widget *widget, void *data)
 	cairo_fill(cr);
 
 	cairo_destroy(cr);
-
-	surface = window_get_surface(dialog->window);
-	cairo_surface_destroy(surface);
 }
 
 static void
@@ -962,13 +1098,6 @@ unlock_dialog_resize_handler(struct widget *widget,
 	}
 }
 
-static void
-unlock_dialog_keyboard_focus_handler(struct window *window,
-				     struct input *device, void *data)
-{
-	window_schedule_redraw(window);
-}
-
 static struct unlock_dialog *
 unlock_dialog_create(struct desktop *desktop)
 {
@@ -984,8 +1113,6 @@ unlock_dialog_create(struct desktop *desktop)
 	window_set_title(dialog->window, "Choose a user");
 
 	window_set_user_data(dialog->window, dialog);
-	window_set_keyboard_focus_handler(dialog->window,
-					  unlock_dialog_keyboard_focus_handler);
 	wl_list_init(&dialog->user_list);
 	widget_set_redraw_handler(dialog->widget,
 				  unlock_dialog_redraw_handler);
@@ -1031,7 +1158,8 @@ unlock_dialog_destroy(struct unlock_dialog *dialog)
 		free(entry->name);
 		free(entry);	
 	}
-	window_destroy(dialog->window);
+	 /* crashes in ToyToolkit or shell->handle_lock_surface_destroy() */
+	/*window_destroy(dialog->window);*/
 	free(dialog);
 }
 
