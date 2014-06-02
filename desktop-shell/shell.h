@@ -102,6 +102,9 @@ struct workspace {
 	struct focus_surface *fsurf_front;
 	struct focus_surface *fsurf_back;
 	struct weston_view_animation *focus_animation;
+
+	struct weston_layer minimized_layer;
+	char *username;
 };
 
 struct shell_output {
@@ -157,6 +160,7 @@ struct desktop_shell {
 		struct wl_array array;
 		unsigned int current;
 		unsigned int num;
+		unsigned int num_per_user;
 
 		struct wl_list client_list;
 
