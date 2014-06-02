@@ -94,6 +94,8 @@
       </description>
     </request>
 
+    <request name="lock" since="2"/>
+
   </interface>
 
   <interface name="screensaver" version="1">

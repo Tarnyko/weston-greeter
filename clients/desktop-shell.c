@@ -82,6 +82,8 @@ struct panel {
 	struct widget *widget;
 	struct wl_list launcher_list;
 	struct panel_clock *clock;
+	struct panel_switcher *switcher;
+	struct desktop *desktop;
 	int painted;
 	uint32_t color;
 };
@@ -124,6 +126,14 @@ struct panel_clock {
 	int clock_fd;
 };
 
+struct panel_switcher {
+	struct widget *widget;
+	struct panel *panel;
+	char *username;
+	cairo_surface_t *icon;
+	int focused;
+};
+
 struct unlock_dialog {
 	struct window *window;
 	struct widget *widget;
@@ -151,6 +161,9 @@ struct password_dialog {
 
 static void
 panel_add_launchers(struct panel *panel, struct desktop *desktop);
+
+static cairo_surface_t *
+load_icon_or_fallback(const char *icon);
 
 static void
 sigchild_handler(int s)
@@ -180,6 +193,14 @@ show_menu(struct panel *panel, struct input *input, uint32_t time)
 	window_show_menu(window_get_display(panel->window),
 			 input, time, panel->window,
 			 x - 10, y - 10, menu_func, entries, 4);
+}
+
+static void
+update_window(struct window *window)
+{
+	struct rectangle allocation;
+	window_get_allocation(window, &allocation);
+	window_schedule_resize(window, allocation.width, allocation.height);
 }
 
 static int
@@ -470,6 +491,128 @@ panel_add_clock(struct panel *panel)
 	widget_set_redraw_handler(clock->widget, panel_clock_redraw_handler);
 }
 
+static int
+panel_switcher_enter_handler(struct widget *widget, struct input *input,
+				 float x, float y, void *data)
+{
+	struct panel_switcher *switcher = data;
+
+	switcher->focused = 1;
+	widget_schedule_redraw(widget);
+
+	return CURSOR_LEFT_PTR;
+}
+
+static void
+panel_switcher_leave_handler(struct widget *widget, struct input *input,
+					 void *data)
+{
+	struct panel_switcher *switcher = data;
+
+	switcher->focused = 0;
+	widget_schedule_redraw(widget);
+}
+
+static void
+switcher_menu_func(void *data, struct input *input, int index)
+{
+	struct window *window = data;
+	struct panel *panel = window_get_user_data(window);
+	struct desktop *desktop = panel->desktop;
+
+	if (desktop->interface_version >= 2)
+		desktop_shell_lock(desktop->shell);
+}
+
+static void
+panel_switcher_button_handler(struct widget *widget, struct input *input,
+					 uint32_t time, uint32_t button,
+					 enum wl_pointer_button_state state, void *data)
+{
+	struct panel_switcher *switcher = data;
+	int32_t x, y;
+	static const char *entries[] = {
+		"Switch user", "Logout"
+	};
+
+	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		input_get_position(input, &x, &y);
+		window_show_menu(window_get_display(switcher->panel->window),
+		                 input, time, switcher->panel->window,
+		                 x - 100, y + 15, switcher_menu_func, entries, 2);
+	}
+}
+
+static void
+panel_switcher_redraw_handler(struct widget *widget, void *data)
+{
+	struct panel_switcher *switcher = data;
+	cairo_t *cr;
+	struct rectangle allocation;
+	cairo_text_extents_t extents;
+
+	widget_get_allocation(widget, &allocation);
+	if (allocation.width == 0)
+		return;
+
+	cr = widget_cairo_create(switcher->panel->widget);
+	cairo_select_font_face(cr, "sans",
+	                           CAIRO_FONT_SLANT_NORMAL,
+	                           CAIRO_FONT_WEIGHT_NORMAL);
+	cairo_set_font_size(cr, 14);
+	cairo_text_extents(cr, switcher->username, &extents);
+	cairo_move_to(cr, allocation.x + 5,
+	                  allocation.y + 3 * (allocation.height >> 2) + 1);
+	cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, 1.0);
+	cairo_show_text(cr, switcher->username);
+
+	cairo_set_source_surface(cr, switcher->icon,
+	                         allocation.x + extents.width + 8,
+	                         allocation.y);
+	cairo_paint(cr);
+
+	if(switcher->focused) {
+		cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.4);
+		cairo_mask_surface(cr, switcher->icon,
+	                         allocation.x + extents.width + 8,
+	                         allocation.y);		                     
+	}
+
+	cairo_destroy(cr);
+}
+
+static void
+panel_destroy_switcher (struct panel_switcher *switcher)
+{
+	cairo_surface_destroy(switcher->icon);
+
+	widget_destroy(switcher->widget);
+	free(switcher->username);
+	free(switcher);
+}
+
+static void
+panel_add_switcher(struct panel *panel)
+{
+	struct panel_switcher *switcher;
+
+	switcher = xzalloc(sizeof *switcher);
+	switcher->username = strdup("Guest");
+	switcher->icon = load_icon_or_fallback(DATADIR "/weston/icon_user.png");
+	switcher->panel = panel;
+	panel->switcher = switcher;
+
+	switcher->widget = widget_add_widget(panel->widget, switcher);
+	widget_set_enter_handler(switcher->widget,
+	                         panel_switcher_enter_handler);
+	widget_set_leave_handler(switcher->widget,
+	                         panel_switcher_leave_handler);
+	widget_set_button_handler(switcher->widget,
+	                          panel_switcher_button_handler);
+	widget_set_redraw_handler(switcher->widget,
+	                          panel_switcher_redraw_handler);
+}
+
 static void
 panel_button_handler(struct widget *widget,
 		     struct input *input, uint32_t time,
@@ -488,6 +631,8 @@ panel_resize_handler(struct widget *widget,
 {
 	struct panel_launcher *launcher;
 	struct panel *panel = data;
+	cairo_t *cr;
+	cairo_text_extents_t extents;
 	int x, y, w, h;
 	
 	x = 10;
@@ -500,11 +645,21 @@ panel_resize_handler(struct widget *widget,
 		x += w + 10;
 	}
 	h=20;
-	w=170;
 
-	if (panel->clock)
+	if (panel->switcher) {
+		cr = cairo_create(panel->switcher->icon);
+		cairo_text_extents(cr, panel->switcher->username, &extents);
+		w = cairo_image_surface_get_width(panel->switcher->icon)
+		    + extents.width + 8 * 3;
+		widget_set_allocation(panel->switcher->widget,
+		                      width - w, y - h / 2, w +1, h + 1);
+	}
+
+	if (panel->clock) {
+		w += 170;
 		widget_set_allocation(panel->clock->widget,
-				      width - w - 8, y - h / 2, w + 1, h + 1);
+				      width - w - 8, y - h / 2, 170 + 1, h + 1);
+	}
 }
 
 static void
@@ -542,6 +697,7 @@ panel_destroy(struct panel *panel)
 	struct panel_launcher *launcher;
 
 	panel_destroy_clock(panel->clock);
+	panel_destroy_switcher(panel->switcher);
 
 	wl_list_for_each_safe(launcher, tmp, &panel->launcher_list, link)
 		panel_destroy_launcher(launcher);
@@ -563,6 +719,7 @@ panel_create(struct desktop *desktop)
 	panel->base.configure = panel_configure;
 	panel->window = window_create_custom(desktop->display);
 	panel->widget = window_add_widget(panel->window, panel);
+	panel->desktop = desktop;
 	wl_list_init(&panel->launcher_list);
 
 	window_set_title(panel->window, "panel");
@@ -573,6 +730,7 @@ panel_create(struct desktop *desktop)
 	widget_set_button_handler(panel->widget, panel_button_handler);
 	
 	panel_add_clock(panel);
+	panel_add_switcher(panel);
 
 	s = weston_config_get_section(desktop->config, "shell", NULL, NULL);
 	weston_config_section_get_uint(s, "panel-color",
@@ -814,6 +972,15 @@ password_dialog_key_handler(struct window *window, struct input *input,
 
 	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
 		if (!dialog->entry->dialog->closing) {
+			 /* quick hack to update the username for the demo */
+			 /* we'll have a real protocol for that later */
+			struct output *output;
+			wl_list_for_each(output, &dialog->entry->dialog->desktop->outputs, link) {
+				free(output->panel->switcher->username);
+				output->panel->switcher->username = strdup(dialog->entry->name);
+				update_window(output->panel->window);
+			}
+
 			display_defer(dialog->entry->dialog->desktop->display,
 			              &dialog->entry->dialog->desktop->unlock_task);
 			dialog->entry->dialog->closing = 1;
@@ -992,11 +1159,7 @@ user_entry_touch_up_handler(struct widget *widget, struct input *input,
 	entry->focused = 0;
 	widget_schedule_redraw(widget);
 
-	if (!entry->dialog->closing) {
-		display_defer(entry->dialog->desktop->display,
-		              &entry->dialog->desktop->unlock_task);
-		entry->dialog->closing = 1;
-	}
+	password_dialog_create(entry);
 }
 
 static void

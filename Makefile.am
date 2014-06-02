@@ -627,6 +627,7 @@ dist_westondata_DATA =				\
 	data/terminal.png			\
 	data/user.png				\
 	data/border.png				\
+	data/icon_user.png			\
 	data/icon_window.png			\
 	data/sign_close.png			\
 	data/sign_maximize.png			\
