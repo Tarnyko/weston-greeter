@@ -97,6 +97,8 @@ struct background {
 	struct window *window;
 	struct widget *widget;
 	int painted;
+	char *username;
+	struct wl_list link;
 
 	char *image;
 	int type;
@@ -111,6 +113,7 @@ struct output {
 	struct panel *panel;
 	struct wl_list panels;
 	struct background *background;
+	struct wl_list backgrounds;
 };
 
 struct panel_launcher {
@@ -169,6 +172,9 @@ panel_add_launchers(struct panel *panel, struct desktop *desktop);
 
 static cairo_surface_t *
 load_icon_or_fallback(const char *icon);
+
+static struct background *
+background_create(struct desktop *desktop);
 
 static void
 sigchild_handler(int s)
@@ -1421,14 +1427,17 @@ desktop_shell_user_switched(void *data,
 	struct desktop *desktop = data;
 	struct output *output;
 	struct panel *panel;
+	struct background *background;
 	struct wl_surface *surface;
 	int panel_exists;
+	int background_exists;
 
 	if (desktop->current_user)
 		free(desktop->current_user);
 	desktop->current_user = strdup(username);
 
 	panel_exists = 0;
+	background_exists = 0;
 
 	wl_list_for_each(output, &desktop->outputs, link) {
 		wl_list_for_each(panel, &output->panels, link) {
@@ -1439,15 +1448,29 @@ desktop_shell_user_switched(void *data,
 				desktop_shell_set_panel(desktop->shell, output->output, surface);
 			}
 		}
-
 		if (!panel_exists) {
 			output->panel = panel_create(desktop);
 			wl_list_insert(&output->panels, &output->panel->link);
 			surface = window_get_wl_surface(output->panel->window);
 			desktop_shell_set_panel(desktop->shell, output->output, surface);
 		}
-
 		panel_exists = 0;
+
+		wl_list_for_each(background, &output->backgrounds, link) {
+			if (!strcmp(background->username, username)) {
+				background_exists = 1;
+				output->background = background;
+				surface = window_get_wl_surface(background->window);
+				desktop_shell_set_background(desktop->shell, output->output, surface);
+			}
+		}
+		if (!background_exists) {
+			output->background = background_create(desktop);
+			wl_list_insert(&output->backgrounds, &output->background->link);
+			surface = window_get_wl_surface(output->background->window);
+			desktop_shell_set_background(desktop->shell, output->output, surface);
+		}
+		background_exists = 0;
 	}
 
 	display_defer(desktop->display, &desktop->unlock_task);
@@ -1466,7 +1489,10 @@ background_destroy(struct background *background)
 	widget_destroy(background->widget);
 	window_destroy(background->window);
 
+	wl_list_remove(&background->link);
+
 	free(background->image);
+	free(background->username);
 	free(background);
 }
 
@@ -1475,6 +1501,8 @@ background_create(struct desktop *desktop)
 {
 	struct background *background;
 	struct weston_config_section *s;
+	char *user_background_img;
+	char *user_background_col;
 	char *type;
 
 	background = xzalloc(sizeof *background);
@@ -1486,11 +1514,27 @@ background_create(struct desktop *desktop)
 	window_set_preferred_format(background->window,
 				    WINDOW_PREFERRED_FORMAT_RGB565);
 
+	background->username = strdup(desktop->current_user);
+	asprintf(&user_background_img, "background-image-%s", background->username);
+	asprintf(&user_background_col, "background-color-%s", background->username);
+
 	s = weston_config_get_section(desktop->config, "shell", NULL, NULL);
-	weston_config_section_get_string(s, "background-image",
-					 &background->image, NULL);
-	weston_config_section_get_uint(s, "background-color",
+
+	weston_config_section_get_string(s, user_background_img,
+					 &background->image,
+	                 DATADIR "/weston/pattern.png");
+	if (!strcmp(background->image, DATADIR "/weston/pattern.png")) {
+		weston_config_section_get_string(s, "background-image",
+						 &background->image,
+	    	             DATADIR "/weston/pattern.png");
+	}
+
+	weston_config_section_get_uint(s, user_background_col,
 				       &background->color, 0);
+	if (background->color == 0) {
+		weston_config_section_get_uint(s, "background-color",
+					       &background->color, 0);
+	}
 
 	weston_config_section_get_string(s, "background-type",
 					 &type, "tile");
@@ -1512,6 +1556,8 @@ background_create(struct desktop *desktop)
 	}
 
 	free(type);
+	free(user_background_col);
+	free(user_background_img);
 
 	return background;
 }
@@ -1556,10 +1602,12 @@ grab_surface_create(struct desktop *desktop)
 static void
 output_destroy(struct output *output)
 {
-	struct panel *panel, *tmp;
+	struct panel *panel, *tmp_panel;
+	struct background *background, *tmp_background;
 
-	background_destroy(output->background);
-	wl_list_for_each_safe(panel, tmp, &output->panels, link)
+	wl_list_for_each_safe(background, tmp_background, &output->backgrounds, link)
+		background_destroy(background);
+	wl_list_for_each_safe(panel, tmp_panel, &output->panels, link)
 		panel_destroy(panel);
 	wl_output_destroy(output->output);
 	wl_list_remove(&output->link);
@@ -1634,6 +1682,7 @@ output_init(struct output *output, struct desktop *desktop)
 	struct wl_surface *surface;
 
 	wl_list_init(&output->panels);
+	wl_list_init(&output->backgrounds);
 
 	output->panel = panel_create(desktop);
 	wl_list_insert(&output->panels, &output->panel->link);
@@ -1642,6 +1691,7 @@ output_init(struct output *output, struct desktop *desktop)
 				output->output, surface);
 
 	output->background = background_create(desktop);
+	wl_list_insert(&output->backgrounds, &output->background->link);
 	surface = window_get_wl_surface(output->background->window);
 	desktop_shell_set_background(desktop->shell,
 				     output->output, surface);
