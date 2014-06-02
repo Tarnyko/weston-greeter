@@ -96,6 +96,23 @@
 
     <request name="lock" since="2"/>
 
+    <request name="switch_user" since="2">
+      <description summary="switch the current user">
+	Tells the shell to switch the current user, which will run
+    some shell-specific tasks (create a new panel, background, etc)
+    and send a "user_switched" event when finished.
+      </description>
+      <arg name="username" type="string"/>
+    </request>
+
+    <event name="user_switched">
+      <description summary="tell client that user has been switched">
+	This event will be sent after all tasks related to switching the
+    current user have been completed.
+      </description>
+      <arg name="username" type="string"/>
+    </event>
+
   </interface>
 
   <interface name="screensaver" version="1">

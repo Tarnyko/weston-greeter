@@ -205,6 +205,7 @@ struct desktop_shell {
 	struct wl_list output_list;
 
 	char *client;
+	char *current_user;
 };
 
 struct weston_output *

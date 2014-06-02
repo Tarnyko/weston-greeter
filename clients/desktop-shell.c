@@ -67,6 +67,8 @@ struct desktop {
 	enum cursor_type grab_cursor;
 
 	int painted;
+
+	char *current_user;
 };
 
 struct surface {
@@ -80,12 +82,14 @@ struct panel {
 	struct surface base;
 	struct window *window;
 	struct widget *widget;
+	int painted;
+	uint32_t color;
+	struct wl_list link;
+
 	struct wl_list launcher_list;
 	struct panel_clock *clock;
 	struct panel_switcher *switcher;
 	struct desktop *desktop;
-	int painted;
-	uint32_t color;
 };
 
 struct background {
@@ -105,6 +109,7 @@ struct output {
 	struct wl_list link;
 
 	struct panel *panel;
+	struct wl_list panels;
 	struct background *background;
 };
 
@@ -597,7 +602,7 @@ panel_add_switcher(struct panel *panel)
 	struct panel_switcher *switcher;
 
 	switcher = xzalloc(sizeof *switcher);
-	switcher->username = strdup("Guest");
+	switcher->username = strdup(panel->desktop->current_user);
 	switcher->icon = load_icon_or_fallback(DATADIR "/weston/icon_user.png");
 	switcher->panel = panel;
 	panel->switcher = switcher;
@@ -705,6 +710,7 @@ panel_destroy(struct panel *panel)
 	widget_destroy(panel->widget);
 	window_destroy(panel->window);
 
+	wl_list_remove(&panel->link);
 	free(panel);
 }
 
@@ -959,6 +965,7 @@ password_dialog_key_handler(struct window *window, struct input *input,
 				 enum wl_keyboard_key_state state, void *data)
 {
 	struct password_dialog *dialog = data;
+	struct desktop *desktop = dialog->entry->dialog->desktop;
 	char *new_text;
 	char text[16];
 
@@ -974,15 +981,7 @@ password_dialog_key_handler(struct window *window, struct input *input,
 		if (!dialog->entry->dialog->closing) {
 			 /* quick hack to update the username for the demo */
 			 /* we'll have a real protocol for that later */
-			struct output *output;
-			wl_list_for_each(output, &dialog->entry->dialog->desktop->outputs, link) {
-				free(output->panel->switcher->username);
-				output->panel->switcher->username = strdup(dialog->entry->name);
-				update_window(output->panel->window);
-			}
-
-			display_defer(dialog->entry->dialog->desktop->display,
-			              &dialog->entry->dialog->desktop->unlock_task);
+			desktop_shell_switch_user(desktop->shell, dialog->entry->name);
 			dialog->entry->dialog->closing = 1;
 		}
 		password_dialog_destroy(dialog);
@@ -1414,10 +1413,51 @@ desktop_shell_grab_cursor(void *data,
 	}
 }
 
+static void
+desktop_shell_user_switched(void *data,
+			  struct desktop_shell *desktop_shell,
+			  const char *username)
+{
+	struct desktop *desktop = data;
+	struct output *output;
+	struct panel *panel;
+	struct wl_surface *surface;
+	int panel_exists;
+
+	if (desktop->current_user)
+		free(desktop->current_user);
+	desktop->current_user = strdup(username);
+
+	panel_exists = 0;
+
+	wl_list_for_each(output, &desktop->outputs, link) {
+		wl_list_for_each(panel, &output->panels, link) {
+			if (!strcmp(panel->switcher->username, username)) {
+				panel_exists = 1;
+				output->panel = panel;
+				surface = window_get_wl_surface(panel->window);
+				desktop_shell_set_panel(desktop->shell, output->output, surface);
+			}
+		}
+
+		if (!panel_exists) {
+			output->panel = panel_create(desktop);
+			wl_list_insert(&output->panels, &output->panel->link);
+			surface = window_get_wl_surface(output->panel->window);
+			desktop_shell_set_panel(desktop->shell, output->output, surface);
+		}
+
+		panel_exists = 0;
+	}
+
+	display_defer(desktop->display, &desktop->unlock_task);
+}
+
 static const struct desktop_shell_listener listener = {
 	desktop_shell_configure,
 	desktop_shell_prepare_lock_surface,
-	desktop_shell_grab_cursor
+	desktop_shell_grab_cursor,
+	desktop_shell_user_switched
 };
 
 static void
@@ -1516,8 +1556,11 @@ grab_surface_create(struct desktop *desktop)
 static void
 output_destroy(struct output *output)
 {
+	struct panel *panel, *tmp;
+
 	background_destroy(output->background);
-	panel_destroy(output->panel);
+	wl_list_for_each_safe(panel, tmp, &output->panels, link)
+		panel_destroy(panel);
 	wl_output_destroy(output->output);
 	wl_list_remove(&output->link);
 
@@ -1590,7 +1633,10 @@ output_init(struct output *output, struct desktop *desktop)
 {
 	struct wl_surface *surface;
 
+	wl_list_init(&output->panels);
+
 	output->panel = panel_create(desktop);
+	wl_list_insert(&output->panels, &output->panel->link);
 	surface = window_get_wl_surface(output->panel->window);
 	desktop_shell_set_panel(desktop->shell,
 				output->output, surface);
@@ -1662,14 +1708,17 @@ static void
 panel_add_launchers(struct panel *panel, struct desktop *desktop)
 {
 	struct weston_config_section *s;
+	char *user_section;
 	char *icon, *path;
 	const char *name;
 	int count;
 
 	count = 0;
 	s = NULL;
+	asprintf(&user_section, "launcher-%s", desktop->current_user);
 	while (weston_config_next_section(desktop->config, &s, &name)) {
-		if (strcmp(name, "launcher") != 0)
+		if ((strcmp(name, "launcher") != 0) &&
+		    (strcmp(name, user_section) != 0))
 			continue;
 
 		weston_config_section_get_string(s, "icon", &icon, NULL);
@@ -1685,6 +1734,7 @@ panel_add_launchers(struct panel *panel, struct desktop *desktop)
 		free(icon);
 		free(path);
 	}
+	free(user_section);
 
 	if (count == 0) {
 		/* add default launcher */
@@ -1706,6 +1756,8 @@ int main(int argc, char *argv[])
 	desktop.config = weston_config_parse("weston.ini");
 	s = weston_config_get_section(desktop.config, "shell", NULL, NULL);
 	weston_config_section_get_bool(s, "locking", &desktop.locking, 1);
+
+	desktop.current_user = strdup("Guest");
 
 	desktop.display = display_create(&argc, argv);
 	if (desktop.display == NULL) {
@@ -1734,6 +1786,7 @@ int main(int argc, char *argv[])
 	desktop_destroy_outputs(&desktop);
 	if (desktop.unlock_dialog)
 		unlock_dialog_destroy(desktop.unlock_dialog);
+	free(desktop.current_user);
 	desktop_shell_destroy(desktop.shell);
 	display_destroy(desktop.display);
 
