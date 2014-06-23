@@ -33,6 +33,7 @@
 #include <signal.h>
 #include <math.h>
 #include <sys/types.h>
+#include <pwd.h>
 
 #include "shell.h"
 #include "desktop-shell-server-protocol.h"
@@ -2194,8 +2195,13 @@ restore_all_output_modes(struct weston_compositor *compositor)
 static struct wl_list *
 shell_surface_calculate_layer_link (struct shell_surface *shsurf)
 {
-	struct workspace *ws;
+	struct workspace **cuws;
+	struct workspace *ws = NULL;
 	struct weston_view *parent;
+	struct passwd *pwd;
+	struct wl_client *client;
+	uid_t uid;
+	char *username = NULL;
 
 	switch (shsurf->type) {
 	case SHELL_SURFACE_XWAYLAND:
@@ -2218,12 +2224,34 @@ shell_surface_calculate_layer_link (struct shell_surface *shsurf)
 			parent = get_default_view(shsurf->parent);
 			if (parent)
 				return parent->layer_link.prev;
+		} else {
+			client = wl_resource_get_client(shsurf->resource);
+			wl_client_get_credentials(client, NULL, &uid, NULL);
+			pwd = getpwent();
+			while (pwd) {
+				if (pwd->pw_uid == uid) {
+					username = strdup(pwd->pw_name);
+					break;
+				}
+				pwd = getpwent();
+			}
+			endpwent();
+
+			if (username) {
+				wl_array_for_each(cuws, &shsurf->shell->workspaces.array) {
+					if ((*cuws)->username && (!strcmp(username, (*cuws)->username)))
+						ws = *cuws;
+				}
+				free(username);
+			}
 		}
 
 		/* Move the surface to a normal workspace layer so that surfaces
 		 * which were previously fullscreen or transient are no longer
 		 * rendered on top. */
-		ws = get_current_workspace(shsurf->shell);
+		if (!ws)
+			ws = get_current_workspace(shsurf->shell);
+
 		return &ws->layer.view_list;
 	}
 
