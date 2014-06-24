@@ -40,6 +40,7 @@
 #include <ctype.h>
 #include <time.h>
 #include <pwd.h>
+#include <grp.h>
 
 #include <wayland-client.h>
 #include "window.h"
@@ -229,6 +230,37 @@ is_desktop_painted(struct desktop *desktop)
 	return 1;
 }
 
+static int
+run_as_user(char *command[], char *user)
+{
+	struct passwd *pwd = NULL;
+	char *xrd = NULL;
+
+	pwd = getpwnam(user);
+	xrd = getenv("XDG_RUNTIME_DIR");
+	if (!pwd || !xrd)
+		return -1;
+
+	char *env[16];
+	asprintf(&env[0], "TERM=weston-terminal");
+	asprintf(&env[1], "USER=%s", pwd->pw_name);
+	asprintf(&env[2], "HOME=%s", pwd->pw_dir);
+	asprintf(&env[3], "SHELL=%s", pwd->pw_shell);
+	asprintf(&env[4], "LOGNAME=%s", pwd->pw_name);
+	asprintf(&env[5], "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+	asprintf(&env[6], "XDG_RUNTIME_DIR=%s", xrd);
+	env[7] = 0;
+
+	initgroups(pwd->pw_name, pwd->pw_gid);
+	setgid(pwd->pw_gid);
+	setuid(pwd->pw_uid);
+	execve(command[0], command, env);
+	setgid(0);
+	setuid(0);
+
+	return 0;
+}
+
 static void
 check_desktop_ready(struct window *window)
 {
@@ -250,6 +282,7 @@ static void
 panel_launcher_activate(struct panel_launcher *widget)
 {
 	char **argv;
+	char *user;
 	pid_t pid;
 
 	pid = fork();
@@ -262,9 +295,21 @@ panel_launcher_activate(struct panel_launcher *widget)
 		return;
 
 	argv = widget->argv.data;
-	if (execve(argv[0], argv, widget->envp.data) < 0) {
-		fprintf(stderr, "execl '%s' failed: %m\n", argv[0]);
-		exit(1);
+
+	if (getuid() == 0) {
+		user = widget->panel->desktop->current_user;
+		if (!strcmp(user, "Guest"))
+			user = strdup("nobody");
+
+		if (run_as_user(argv, user) < 0) {
+			fprintf(stderr, "execl '%s' failed: %m\n", argv[0]);
+			exit(1);
+		}
+	} else {
+		if (execve(argv[0], argv, widget->envp.data) < 0) {
+			fprintf(stderr, "execl '%s' failed: %m\n", argv[0]);
+			exit(1);
+		}
 	}
 }
 
