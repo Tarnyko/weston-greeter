@@ -5055,6 +5055,12 @@ weston_view_set_initial_position(struct weston_view *view,
 	int dx, dy, x, y, panel_height;
 	struct weston_output *output, *target_output = NULL;
 	struct weston_seat *seat;
+	struct wl_client *client;
+	struct weston_config_section *s = NULL;
+	const char *section_name;
+	char *name, *user, *username;
+	struct passwd *pwd;
+	uid_t uid;
 
 	/* As a heuristic place the new window on the same output as the
 	 * pointer. Falling back to the output containing 0, 0.
@@ -5069,10 +5075,44 @@ weston_view_set_initial_position(struct weston_view *view,
 		}
 	}
 
-	wl_list_for_each(output, &compositor->output_list, link) {
-		if (pixman_region32_contains_point(&output->region, ix, iy, NULL)) {
-			target_output = output;
+	client = wl_resource_get_client(view->surface->resource);
+	wl_client_get_credentials(client, NULL, &uid, NULL);
+
+	pwd = getpwent();
+	while (pwd) {
+		if (pwd->pw_uid == uid) {
+			username = strdup(pwd->pw_name);
 			break;
+		}
+		pwd = getpwent();
+	}
+	endpwent();
+
+	if (username) {
+		wl_list_for_each(output, &compositor->output_list, link) {
+			if (output->name) weston_log ("OUTPUT : %s\n", output->name);
+				while (weston_config_next_section(compositor->config, &s, &section_name)) {
+					if (!strcmp(section_name, "output")) {
+						weston_config_section_get_string(s, "name", &name, NULL);
+						weston_config_section_get_string(s, "user", &user, NULL);
+
+						if ((output->name) && (!strcmp(output->name, name)) && (!strcmp(username, user)) ) {
+							weston_log ("ON CHOISIR CET OUTPUT %s POUR %s\n", name, user);
+							target_output = output;
+							break;
+						}
+					}
+				}
+		}
+		free(username);
+	}
+
+	if (!target_output) {
+		wl_list_for_each(output, &compositor->output_list, link) {
+			if (pixman_region32_contains_point(&output->region, ix, iy, NULL)) {
+				target_output = output;
+				break;
+			}
 		}
 	}
 
